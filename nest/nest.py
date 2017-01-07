@@ -9,6 +9,8 @@ import os
 import uuid
 import weakref
 
+from contextlib import closing
+
 from dateutil.parser import parse as parse_time
 
 import requests
@@ -1645,3 +1647,67 @@ class Nest(object):
     @property
     def user(self):
         raise NotImplementedError("Deprecated Nest API")
+
+    def stream(self):
+        """
+        Nest streaming support is used in the <https://codelabs.developers.google.com/codelabs/nest-cloud-nodejs/#2>
+        polymeter/nest/nodejs codelabs tutorial, with source available on
+        https://github.com/googlecodelabs/nest-cloud-nodejs/
+
+        This was used as implicit documentation
+        """
+        url = generate_subscribe_url(API_URL, self._session.auth.access_token)
+        req = self._session.request('GET', url, stream=True, headers={
+            'Accept': 'text/event-stream'
+        })
+
+        with closing(req) as r:
+            event = None
+            data = None
+
+            for line in r.iter_lines():
+                line = line.decode('utf-8')
+
+                if not line:
+                    if event:
+                        yield (event, None)
+
+                    event = None
+                    data = None
+
+                if line.startswith('event:'):
+                    event = line.split('event: ')[1]
+
+                if line.startswith('data:'):
+                    data = line.split('data: ')[1]
+                    data = json.loads(data)
+
+                if event and data:
+                    yield (event, data)
+
+                    event = None
+                    data = None
+
+
+def generate_subscribe_url(base_url, access_token):
+    """
+    `nest/network/NestNetworkManagerUtils.js:81`
+
+    Generates a URL used for the HTTP REST-STREAMING method for
+    streaming changes on the account root.
+    @function
+    @name generateSubscribeUrl
+    @param {String} baseUrl - the base url of the target API
+    @param {String} accessToken - the users token for use with the WWN API
+    @returns {String} - the fully formed root streaming url
+    """
+    
+    return "/".join([
+        base_url,
+        "".join([
+            "?",
+            "auth",
+            "=",
+            access_token
+        ])
+    ])
