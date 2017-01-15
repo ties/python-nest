@@ -13,6 +13,9 @@ from contextlib import closing
 
 from dateutil.parser import parse as parse_time
 
+import aiohttp
+import async_timeout
+
 import requests
 from requests import auth
 from requests import adapters
@@ -27,6 +30,8 @@ SIMULATOR_SNAPSHOT_URL = \
     '/simulator/api/v1/nest/devices/camera/snapshot'
 SIMULATOR_SNAPSHOT_PLACEHOLDER_URL = \
     'https://media.giphy.com/media/WCwFvyeb6WJna/giphy.gif'
+
+STREAM_TIMEOUT = 120
 
 AWAY_MAP = {'on': 'away',
             'away': 'away',
@@ -1650,30 +1655,68 @@ class Nest(object):
 
     def stream(self):
         """
-        Nest streaming support is used in the <https://codelabs.developers.google.com/codelabs/nest-cloud-nodejs/#2>
-        polymeter/nest/nodejs codelabs tutorial, with source available on
-        https://github.com/googlecodelabs/nest-cloud-nodejs/
+        Connect to the Nest streaming API. This is used as a asynchronous
+        context manager that returns a asynchronous generator:
 
-        This was used as implicit documentation
+            async with nest.stream() as nest_events:
+                async for event in nest_events:
+                    print(event)
         """
-        url = generate_subscribe_url(API_URL, self._session.auth.access_token)
-        req = self._session.request('GET', url, stream=True, headers={
+        return NestStreamingClient(self)
+
+
+class NestStreamingClient(object):
+    """
+    Nest streaming support is used in the <https://codelabs.developers.google.com/codelabs/nest-cloud-nodejs/#2>
+    polymeter/nest/nodejs codelabs tutorial, with source available on
+    https://github.com/googlecodelabs/nest-cloud-nodejs/
+
+    This was used as implicit documentation
+    """
+    def __init__(self, client):
+        self.auth = client._session.auth
+
+        assert(self.auth.access_token)
+
+    def __aiter__(self):
+        return self
+
+    async def __aenter__(self):
+        """
+        Open the asynchronous contexts
+        """
+        url = self.__generate_subscribe_url()
+
+        self.session = aiohttp.ClientSession()
+        self.req = await self.session.get(url, headers={
             'Accept': 'text/event-stream'
         })
 
-        with closing(req) as r:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        """
+        Close the context objects we wrap, using the close calls instead
+        of the asynchronous context hooks
+        """
+        try:
+            self.req.close()
+            self.req = None
+        finally:
+            await self.session.close()
+            self.session = None
+
+    async def __anext__(self):
+        with async_timeout.timeout(STREAM_TIMEOUT, loop=self.session.loop):
+            # are reset on every iteration
             event = None
             data = None
 
-            for line in r.iter_lines():
-                line = line.decode('utf-8')
+            async for line in self.req.content:
+                line = line.decode('utf-8').strip()
 
-                if not line:
-                    if event:
-                        yield (event, None)
-
-                    event = None
-                    data = None
+                if not line and event:
+                    return (event, None)
 
                 if line.startswith('event:'):
                     event = line.split('event: ')[1]
@@ -1683,31 +1726,27 @@ class Nest(object):
                     data = json.loads(data)
 
                 if event and data:
-                    yield (event, data)
+                    return (event, data)
 
-                    event = None
-                    data = None
+    def __generate_subscribe_url(self):
+        """
+        `nest/network/NestNetworkManagerUtils.js:81`
 
-
-def generate_subscribe_url(base_url, access_token):
-    """
-    `nest/network/NestNetworkManagerUtils.js:81`
-
-    Generates a URL used for the HTTP REST-STREAMING method for
-    streaming changes on the account root.
-    @function
-    @name generateSubscribeUrl
-    @param {String} baseUrl - the base url of the target API
-    @param {String} accessToken - the users token for use with the WWN API
-    @returns {String} - the fully formed root streaming url
-    """
-    
-    return "/".join([
-        base_url,
-        "".join([
-            "?",
-            "auth",
-            "=",
-            access_token
+        Generates a URL used for the HTTP REST-STREAMING method for
+        streaming changes on the account root.
+        @function
+        @name generateSubscribeUrl
+        @param {String} baseUrl - the base url of the target API
+        @param {String} accessToken - the users token for use with the WWN API
+        @returns {String} - the fully formed root streaming url
+        """
+        
+        return "/".join([
+            API_URL,
+            "".join([
+                "?",
+                "auth",
+                "=",
+                self.auth.access_token
+            ])
         ])
-    ])

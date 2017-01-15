@@ -13,6 +13,11 @@ from setuptools import setup
 #                    significant enough to warrant a minor/major bump.
 version = '3.0.4'
 
+# NOTE(TdK) streaming client uses asyncio with async iterator protocol
+#           as changed in Python 3.5.2
+import sys
+if sys.version_info < (3,5,2):
+    sys.exit('Sorry, Python < 3.5.2 is not supported')
 
 setup(name='python-nest',
       version=version,
@@ -26,6 +31,7 @@ setup(name='python-nest',
       packages=['nest'],
       install_requires=['requests>=1.0.0',
                         'six>=1.10.0',
+                        'aiohttp>=1.2.0',
                         'python-dateutil'],
       entry_points={
           'console_scripts': ['nest=nest.command_line:main'],
