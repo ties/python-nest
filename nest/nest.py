@@ -1,5 +1,6 @@
 # -*- coding:utf-8 -*-
 
+import asyncio
 import collections
 import copy
 import datetime
@@ -1673,62 +1674,15 @@ class NestStreamingClient(object):
 
     This was used as implicit documentation
     """
+    __slots__ = ('_auth', '_req', '_session',)
+
     def __init__(self, client):
-        self.auth = client._session.auth
+        assert(client._session.auth.access_token)
 
-        assert(self.auth.access_token)
+        self._auth = client._session.auth
 
-    def __aiter__(self):
-        return self
 
-    async def __aenter__(self):
-        """
-        Open the asynchronous contexts
-        """
-        url = self.__generate_subscribe_url()
-
-        self.session = aiohttp.ClientSession()
-        self.req = await self.session.get(url, headers={
-            'Accept': 'text/event-stream'
-        })
-
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        """
-        Close the context objects we wrap, using the close calls instead
-        of the asynchronous context hooks
-        """
-        try:
-            self.req.close()
-            self.req = None
-        finally:
-            await self.session.close()
-            self.session = None
-
-    async def __anext__(self):
-        with async_timeout.timeout(STREAM_TIMEOUT, loop=self.session.loop):
-            # are reset on every iteration
-            event = None
-            data = None
-
-            async for line in self.req.content:
-                line = line.decode('utf-8').strip()
-
-                if not line and event:
-                    return (event, None)
-
-                if line.startswith('event:'):
-                    event = line.split('event: ')[1]
-
-                if line.startswith('data:'):
-                    data = line.split('data: ')[1]
-                    data = json.loads(data)
-
-                if event and data:
-                    return (event, data)
-
-    def __generate_subscribe_url(self):
+    def generate_subscribe_url(self):
         """
         `nest/network/NestNetworkManagerUtils.js:81`
 
@@ -1747,6 +1701,89 @@ class NestStreamingClient(object):
                 "?",
                 "auth",
                 "=",
-                self.auth.access_token
+                self._auth.access_token
             ])
         ])
+
+    async def __aenter__(self):
+        """
+        Initiate the session and request, 
+        """
+        url = self.generate_subscribe_url()
+
+        self._session = aiohttp.ClientSession()
+        # Note that aiohttp.ClientSession also has a timeout. This timeout is
+        # semantically different from the one used by this client.
+        # 
+        # The client expects data before it times out, the ClientSession
+        # expects data or a HTTP keepalive, the latter of which does not
+        # contain data
+        #
+        self._req = await self._session.get(url, headers={
+            'Accept': 'text/event-stream'
+        })
+
+        if self._req.status not in (200, 207):
+            raise ValueError('Bad response from Nest API')
+
+        return NestStreamingClientAsyncIterator(self._session, self._req)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        """
+        Close the context objects we wrap, using the close calls instead
+        of the asynchronous context hooks
+        """
+        try:
+            self._req.close()
+            self._req = None
+        finally:
+            await self._session.close()
+            self._session = None
+
+
+class NestStreamingClientAsyncIterator(object):
+    """
+    The AsyncIterator implementation is factored out of the NestStreamingClient
+    since it can only be called in a valid state.
+
+    Upon entering the NestStreamingClient's context this async iterator is
+    instantiated.
+    """
+    __slots__ = ['_req', '_session']
+
+    def __init__(self, session, req):
+        self._session = session
+        self._req = req
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        """
+        Iterate over the messages, until it ends.
+
+        asyncio.TimeoutError is raised iff the connection times out.
+        """
+        with async_timeout.timeout(STREAM_TIMEOUT,
+                                   loop=self._session.loop):
+            # are reset on every iteration
+            event = None
+            datum = None
+
+            async for line in self._req.content:
+                line = line.decode('utf-8').strip()
+
+                if not line and event:
+                    return (event, None)
+
+                if line.startswith('event:'):
+                    event = line.split('event: ')[1]
+
+                if line.startswith('data:'):
+                    line_data = line.split('data: ')[1]
+                    datum = json.loads(line_data)
+
+                if event and datum:
+                    return (event, datum)
+
+            raise StopAsyncIteration
